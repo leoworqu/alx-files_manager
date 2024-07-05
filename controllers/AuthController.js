@@ -1,92 +1,58 @@
-#!/usr/bin/node
+import { v4 as uuidv4 } from 'uuid';
 
-const { v4 } = require('uuid');
-const dbClient = require('../utils/db');
+const crypto = require('crypto');
 const redisClient = require('../utils/redis');
-const { getAuthzHeader, getToken, pwdHashed } = require('../utils/utils');
-const { decodeToken, getCredentials } = require('../utils/utils');
+const dbClient = require('../utils/db');
+
+function hashPasswd(password) {
+  const hash = crypto.createHash('sha1');
+  const data = hash.update(password, 'utf-8');
+  // Creating the hash in the required format
+  const genHash = data.digest('hex');
+  return genHash;
+}
 
 class AuthController {
   static async getConnect(req, res) {
-    const authzHeader = getAuthzHeader(req);
-    if (!authzHeader) {
-      res.status(401).json({ error: 'Unauthorized' });
-      res.end();
-      return;
+    const user = req.header('Authorization');
+    if (!user || user.length === 0) {
+      return res.status(401).json({ error: 'Unauthorized' });
     }
-    const token = getToken(authzHeader);
-    if (!token) {
-      res.status(401).json({ error: 'Unauthorized' });
-      res.end();
-      return;
+
+    const data = user.substring(6);
+    const buff = Buffer.from(data, 'base64').toString('utf-8');
+    const credentials = buff.split(':');
+    if (!credentials || credentials.length === 1) {
+      return res.status(401).json({ error: 'Unauthorized' });
     }
-    const decodedToken = decodeToken(token);
-    if (!decodedToken) {
-      res.status(401).json({ error: 'Unauthorized' });
-      res.end();
-      return;
+
+    const email = credentials[0].toString('utf-8');
+    const psswd = credentials[1].toString('utf-8');
+    const hashpwd = hashPasswd(psswd);
+    const search = await dbClient.db.collection('users').find({ email, password: hashpwd }).toArray();
+
+    if (search.length < 1) {
+      return res.status(401).json({ error: 'Unauthorized' });
+    } if (hashpwd !== search[0].password) {
+      return res.status(401).json({ error: 'Unauthorized' });
     }
-    const { email, password } = getCredentials(decodedToken);
-    const user = await dbClient.getUser(email);
-    if (!user) {
-      res.status(401).json({ error: 'Unauthorized' });
-      res.end();
-      return;
-    }
-    if (user.password !== pwdHashed(password)) {
-      res.status(401).json({ error: 'Unauthorized' });
-      res.end();
-      return;
-    }
-    const accessToken = v4();
-    await redisClient.set(`auth_${accessToken}`, user._id.toString('utf8'), 60 * 60 * 24);
-    res.json({ token: accessToken });
-    res.end();
+    const key = uuidv4();
+    const token = `auth_${key}`;
+    await redisClient.set(token, search[0]._id.toString(), 86400);
+    return res.status(200).json({ token: key });
   }
 
   static async getDisconnect(req, res) {
-    const token = req.headers['x-token'];
-    if (!token) {
-      res.status(401).json({ error: 'Unauthorized' });
-      res.end();
-      return;
+    const key = req.header('X-Token');
+    if (!key || key.length === 0) {
+      return res.status(401).json({ error: 'Unauthorized' });
     }
-    const id = await redisClient.get(`auth_${token}`);
-    if (!id) {
-      res.status(401).json({ error: 'Unauthorized' });
-      res.end();
-      return;
-    }
-    const user = await dbClient.getUserById(id);
-    if (!user) {
-      res.status(401).json({ error: 'Unauthorized' });
-      res.end();
-      return;
-    }
-    await redisClient.del(`auth_${token}`);
-    res.status(204).end();
-  }
 
-  static async getMe(req, res) {
-    const token = req.headers['x-token'];
-    if (!token) {
-      res.status(401).json({ error: 'Unauthorized' });
-      res.end();
-      return;
+    if (await redisClient.get(`auth_${key}`)) {
+      await redisClient.del(`auth_${key}`);
+      return res.status(204).end();
     }
-    const id = await redisClient.get(`auth_${token}`);
-    if (!id) {
-      res.status(401).json({ error: 'Unauthorized' });
-      res.end();
-      return;
-    }
-    const user = await dbClient.getUserById(id);
-    if (!user) {
-      res.status(401).json({ error: 'Unauthorized' });
-      res.end();
-      return;
-    }
-    res.json({ id: user._id, email: user.email }).end();
+    return res.status(401).json({ error: 'Unauthorized' });
   }
 }
 
